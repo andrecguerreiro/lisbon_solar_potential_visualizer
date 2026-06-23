@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solar Roof Potential</title>
+  <script src="https://unpkg.com/deck.gl@latest/dist.min.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    html, body, #map { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: Arial, sans-serif; color: #17202a; }
+    #topbar {
+      position: absolute; top: 12px; left: 12px; right: 12px; z-index: 3; min-height: 58px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 10px 14px; box-sizing: border-box; border-radius: 8px;
+      background: rgba(255, 255, 255, 0.94); border: 1px solid rgba(70, 90, 110, 0.18);
+      box-shadow: 0 10px 28px rgba(20, 32, 45, 0.16);
+    }
+    #leftPanel, #rightPanel {
+      position: absolute; z-index: 2; top: 86px; max-height: calc(100% - 104px);
+      overflow: auto; box-sizing: border-box; border-radius: 8px;
+      background: rgba(255, 255, 255, 0.94); border: 1px solid rgba(70, 90, 110, 0.18);
+      box-shadow: 0 10px 28px rgba(20, 32, 45, 0.16);
+    }
+    #leftPanel { left: 12px; width: 390px; padding: 14px; }
+    #rightPanel { right: 12px; width: 340px; padding: 14px; display: none; }
+    h1 { margin: 0; font-size: 20px; line-height: 1.15; }
+    h2 { margin: 0 0 10px; font-size: 14px; }
+    label { display: block; margin: 8px 0; font-size: 13px; }
+    .subtitle { color: #536475; font-size: 12px; margin-top: 4px; }
+    .meta { color: #536475; font-size: 12px; text-align: right; line-height: 1.45; }
+    .kpiGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+    .kpiTile { border: 1px solid #d8e1ea; border-radius: 8px; padding: 10px; background: #f7fafc; }
+    .kpiValue { font-size: 17px; font-weight: 700; color: #12324a; overflow-wrap: anywhere; }
+    .kpiLabel { margin-top: 4px; font-size: 11px; color: #607283; }
+    .section { margin-top: 14px; padding-top: 12px; border-top: 1px solid #d8e1ea; }
+    .orientationRows { display: grid; gap: 6px; font-size: 12px; }
+    .orientationRow { display: flex; justify-content: space-between; gap: 10px; }
+    .legendRow { display: flex; align-items: center; gap: 8px; margin: 7px 0; font-size: 12px; }
+    .swatch { width: 18px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.16); }
+    .hint { color: #607283; font-size: 12px; line-height: 1.4; }
+    .buildingCard { display: grid; gap: 9px; }
+    .detailMetric { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #e2e8ef; padding-bottom: 7px; font-size: 13px; }
+    .detailMetric span:first-child { color: #607283; }
+    .detailMetric span:last-child { font-weight: 700; text-align: right; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <header id="topbar">
+    <div>
+      <h1>Solar Roof Potential</h1>
+      <div id="scenarioName" class="subtitle"></div>
+    </div>
+    <div id="runMeta" class="meta"></div>
+  </header>
+  <aside id="leftPanel">
+    <h2>Scenario Summary</h2>
+    <div id="kpiSummary" class="kpiGrid"></div>
+    <div class="section">
+      <h2>Available Area by Orientation</h2>
+      <div id="orientationSummary" class="orientationRows"></div>
+    </div>
+    <div class="section">
+      <h2>Legend</h2>
+      <div class="legendRow"><span class="swatch" style="background:#5aaaf5"></span><span>3D building volume</span></div>
+      <div class="legendRow"><span class="swatch" style="background:#4b5f7d"></span><span>Generated roof surface</span></div>
+      <div class="legendRow"><span class="swatch" style="background:#ff8c28"></span><span>Annual PV generation bar</span></div>
+      <div class="legendRow"><span class="swatch" style="background:#ffd700"></span><span>Selected building</span></div>
+    </div>
+  </aside>
+  <aside id="rightPanel">
+    <h2>Selected Building</h2>
+    <div id="details" class="buildingCard"></div>
+  </aside>
+  <script>
+    async function loadPayload() {
+      const response = await fetch("payload.json.gz");
+      if (!response.ok) {
+        throw new Error(`Could not load payload.json.gz (${response.status} ${response.statusText})`);
+      }
+
+      const contentEncoding = (response.headers.get("content-encoding") || "").toLowerCase();
+      if (contentEncoding.includes("gzip")) {
+        return response.json();
+      }
+
+      if ("DecompressionStream" in window && response.body) {
+        const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
+        return new Response(stream).json();
+      }
+    
+      const compressed = new Uint8Array(await response.arrayBuffer());
+      const jsonText = window.pako.ungzip(compressed, { to: "string" });
+      return JSON.parse(jsonText);
+    }
+    
+    async function init() {
+      const payload = await loadPayload();
+    let selectedBuilding = null;
+    const details = document.getElementById("details");
+    const rightPanel = document.getElementById("rightPanel");
+    const buildingMetrics = payload.building_metrics || {};
+
+    function hasNumber(value) {
+      return value !== null && value !== undefined && Number.isFinite(Number(value));
+    }
+
+    function n(value, digits = 2) {
+      if (!hasNumber(value)) return "n/a";
+      return Number(value).toLocaleString(undefined, {maximumFractionDigits: digits});
+    }
+
+    function pct(value, digits = 1) {
+      if (!hasNumber(value)) return "n/a";
+      return `${(Number(value) * 100).toLocaleString(undefined, {maximumFractionDigits: digits})}%`;
+    }
+
+    function scenarioDisplayName() {
+      const raw = String(payload.scenario || "").replace(/\\/g, "/");
+      const parts = raw.split("/").filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : "Scenario";
+    }
+
+    function normaliseBuildingName(value) {
+      const name = String(value || "").trim();
+      return name || null;
+    }
+
+    function isSelectedZoneFeature(feature) {
+      const featureName = normaliseBuildingName((feature && feature.properties && feature.properties.name) || "");
+      return Boolean(featureName && selectedBuilding && featureName === selectedBuilding);
+    }
+
+    function setSelectedBuilding(value) {
+      selectedBuilding = normaliseBuildingName(value);
+      rightPanel.style.display = selectedBuilding ? "block" : "none";
+      if (typeof deckgl !== "undefined" && deckgl) {
+        deckgl.setProps({layers: layers()});
+      }
+    }
+
+    const orientationOrder = [
+      ["flat", "Flat"],
+      ["N", "North"],
+      ["E", "East"],
+      ["S", "South"],
+      ["W", "West"]
+    ];
+
+    function orientationRowsHtml(values, unit = "m2") {
+      return orientationOrder
+        .map(([key, label]) => `<div class="orientationRow"><span>${label}</span><strong>${n((values || {})[key], 2)} ${unit}</strong></div>`)
+        .join("");
+    }
+
+    function formatKpiSummary() {
+      const k = payload.kpis || {};
+      const totals = k.totals || {};
+      const roof = k.roof_availability || {};
+
+      return [
+        ["Available Roof Area", `${n(roof.available_roof_area_total_m2)} m2`, ""],
+        ["Installed Power", `${n(totals.installed_power_kwp, 3)} kWp`, ""],
+        ["Annual Generation", `${n(totals.pv_generation_mwh)} MWh`, `${n(totals.pv_generation_kwh)} kWh/year`]
+      ].map(([label, value, note]) => `
+        <div class="kpiTile">
+          <div class="kpiValue">${value}</div>
+          <div class="kpiLabel">${label}${note ? `<br>${note}` : ""}</div>
+        </div>
+      `).join("");
+    }
+
+    document.getElementById("scenarioName").textContent = scenarioDisplayName();
+    document.getElementById("runMeta").textContent = `Panel: ${payload.pv_panel_code || "PV1"} | Generated: ${new Date().toLocaleDateString()}`;
+    document.getElementById("kpiSummary").innerHTML = formatKpiSummary();
+    document.getElementById("orientationSummary").innerHTML = orientationRowsHtml(
+      ((payload.kpis || {}).roof_availability || {}).available_roof_area_by_orientation_m2,
+      "m2"
+    );
+
+    function metricForBuilding(buildingName) {
+      return buildingMetrics[buildingName || ""] || null;
+    }
+
+    function layers() {
+      const result = [];
+      result.push(new deck.GeoJsonLayer({
+        id: "zone-2d", data: payload.zone, pickable: true, stroked: true, filled: true,
+        getFillColor: f => isSelectedZoneFeature(f) ? [255, 215, 0, 110] : [50, 130, 230, 55],
+        getLineColor: f => isSelectedZoneFeature(f) ? [255, 215, 0, 255] : [30, 90, 200, 210],
+        getLineWidth: f => isSelectedZoneFeature(f) ? 4 : 1,
+        lineWidthMinPixels: 1
+      }));
+      result.push(new deck.GeoJsonLayer({
+        id: "zone-3d", data: payload.zone, pickable: true, stroked: true, filled: true,
+        extruded: true, wireframe: true, opacity: 0.35,
+        getFillColor: f => isSelectedZoneFeature(f) ? [255, 215, 0, 190] : [90, 170, 245, 115],
+        getLineColor: f => isSelectedZoneFeature(f) ? [255, 215, 0, 255] : [245, 248, 255, 190],
+        getLineWidth: f => isSelectedZoneFeature(f) ? 4 : 1,
+        getElevation: f => Number((f.properties || {}).viz_height_m || 8)
+      }));
+      result.push(new deck.PolygonLayer({
+        id: "roofs", data: payload.roofs || [], pickable: true, stroked: true, filled: true,
+        getPolygon: d => d.polygon, getFillColor: [75, 95, 125, 130],
+        getLineColor: [45, 65, 95, 235], lineWidthMinPixels: 1
+      }));
+      result.push(new deck.LineLayer({
+        id: "solar-bars", data: payload.bars || [], pickable: true, widthUnits: "meters",
+        getWidth: d => Number(d.bar_width_m || 9.0),
+        getSourcePosition: d => d.source_position, getTargetPosition: d => d.target_position,
+        getColor: d => [...(d.bar_colour || [255, 140, 40]), 230]
+      }));
+      return result;
+    }
+
+    function dominantOrientationFromValues(values) {
+      let bestKey = null;
+      let bestValue = 0;
+      for (const [key] of orientationOrder) {
+        const value = Number((values || {})[key] || 0);
+        if (Number.isFinite(value) && value > bestValue) {
+          bestValue = value;
+          bestKey = key;
+        }
+      }
+      return bestValue > 0 ? bestKey : null;
+    }
+
+    function orientationLabel(key) {
+      const match = orientationOrder.find(([itemKey]) => itemKey === key);
+      return match ? match[1] : key;
+    }
+
+    function roofOrientationKey(roof) {
+      const geometryOrientation = String((roof && roof.orientation) || "").trim();
+      const validGeometryOrientation = orientationOrder.some(([key]) => key === geometryOrientation);
+      if (validGeometryOrientation) return geometryOrientation;
+
+      const buildingName = normaliseBuildingName((roof && roof.building) || "");
+      const bm = buildingName ? (buildingMetrics[buildingName] || null) : null;
+      return dominantOrientationFromValues((bm && bm.available_by_orientation_m2) || null);
+    }
+
+    function roofOrientationAreaM2(roof, orientationKey) {
+      if (!orientationKey) return null;
+      const buildingName = normaliseBuildingName((roof && roof.building) || "");
+      if (!buildingName) return null;
+      const bm = buildingMetrics[buildingName];
+      if (!bm) return null;
+      const values = bm.available_by_orientation_m2 || {};
+      const area = Number(values[orientationKey]);
+      return Number.isFinite(area) ? area : null;
+    }
+
+    function dominantOrientationLabel(values) {
+      const key = dominantOrientationFromValues(values);
+      return key ? orientationLabel(key) : "n/a";
+    }
+
+    function metricRow(label, value) {
+      return `<div class="detailMetric"><span>${label}</span><span>${value}</span></div>`;
+    }
+
+    function formatBuildingDetails(buildingName) {
+      const m = buildingMetrics[buildingName];
+      if (!m) {
+        return `
+          <div class="buildingCard">
+            <h2>${buildingName || "Building"}</h2>
+            <div class="hint">No PV metrics are available for this building.</div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="buildingCard">
+          <h2>${buildingName}</h2>
+          ${metricRow("Annual generation", `${n(m.pv_generation_kwh)} kWh/year`)}
+          ${metricRow("Installed power", `${n(m.pv_installed_power_kwp, 3)} kWp`)}
+          ${metricRow("Installed PV area", `${n(m.pv_installed_area_m2)} m2`)}
+          ${metricRow("Available roof area", `${n(m.available_roof_area_m2)} m2`)}
+          ${metricRow("Dominant roof orientation", dominantOrientationLabel(m.available_by_orientation_m2))}
+          <div class="section">
+            <h2>PV Area by Orientation</h2>
+            <div class="orientationRows">${orientationRowsHtml(m.pv_installed_by_orientation_m2, "m2")}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    const deckgl = new deck.DeckGL({
+      container: "map", mapStyle: payload.map_style, controller: true, layers: layers(),
+      initialViewState: {latitude: payload.centre_lat, longitude: payload.centre_lon, zoom: 13, pitch: 55, bearing: -15},
+      getTooltip: info => {
+        if (!info.object) return null;
+        if (info.layer.id === "roofs") {
+          const buildingName = normaliseBuildingName(info.object.building);
+          const bm = metricForBuilding(buildingName) || {};
+          return `Building: ${buildingName || "-"}\nGeneration: ${n(bm.pv_generation_kwh)} kWh/year`;
+        }
+        if (info.layer.id === "solar-bars") {
+          const bm = buildingMetrics[info.object.building] || {};
+          return `Building: ${info.object.building}\nGeneration: ${n(info.object.solar_kwh, 1)} kWh/year\nInstalled: ${n(bm.pv_installed_power_kwp, 3)} kWp`;
+        }
+        const p = info.object.properties || {};
+        const bm = buildingMetrics[p.name || ""] || {};
+        return `Building: ${p.name || "-"}\nGeneration: ${n(bm.pv_generation_kwh)} kWh/year`;
+      },
+      onClick: info => {
+        if (!info.object) return;
+        if (info.layer.id === "roofs") {
+          const buildingName = info.object.building || "-";
+          setSelectedBuilding(buildingName);
+          details.innerHTML = formatBuildingDetails(buildingName);
+          return;
+        } else if (info.layer.id === "solar-bars") {
+          setSelectedBuilding(info.object.building);
+          details.innerHTML = formatBuildingDetails(info.object.building);
+          return;
+        } else {
+          const p = info.object.properties || {};
+          const buildingName = p.name || "-";
+          setSelectedBuilding(buildingName);
+          details.innerHTML = formatBuildingDetails(buildingName);
+        }
+      }
+    });
+
+    }
+    
+    init().catch((error) => {
+      console.error(error);
+      const message = document.createElement("div");
+      message.style.cssText = "position:absolute;inset:16px;z-index:10;padding:16px;border-radius:8px;background:#fff3f3;border:1px solid #e7a6a6;color:#721c24;font-family:Arial,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,0.16);";
+      message.innerHTML = `<strong>Map data could not be loaded.</strong><br>${error.message}<br><br>Serve this folder over HTTP; browsers usually block fetch() from local file URLs.`;
+      document.body.appendChild(message);
+    });
+  </script>
+</body>
+</html>
