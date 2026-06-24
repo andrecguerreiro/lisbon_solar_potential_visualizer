@@ -59,7 +59,7 @@
     <h2>Scenario Summary</h2>
     <div id="kpiSummary" class="kpiGrid"></div>
     <div class="section">
-      <h2>Available Area by Orientation</h2>
+      <h2>Detected Roof Area by Orientation</h2>
       <div id="orientationSummary" class="orientationRows"></div>
     </div>
     <div class="section">
@@ -176,7 +176,9 @@
     document.getElementById("runMeta").textContent = `Panel: ${payload.pv_panel_code || "PV1"} | Generated: ${new Date().toLocaleDateString()}`;
     document.getElementById("kpiSummary").innerHTML = formatKpiSummary();
     document.getElementById("orientationSummary").innerHTML = orientationRowsHtml(
-      ((payload.kpis || {}).roof_availability || {}).available_roof_area_by_orientation_m2,
+      ((payload.kpis || {}).roof_surfaces || {}).detected_roof_area_by_orientation_m2
+        || ((payload.kpis || {}).roof_availability || {}).display_available_roof_area_by_orientation_m2
+        || ((payload.kpis || {}).roof_availability || {}).available_roof_area_by_orientation_m2,
       "m2"
     );
 
@@ -263,7 +265,21 @@
       return `<div class="detailMetric"><span>${label}</span><span>${value}</span></div>`;
     }
 
-    function formatBuildingDetails(buildingName) {
+    function formatRoofSurfaceDetails(roof) {
+      if (!roof) return "";
+      const orientationKey = roofOrientationKey(roof);
+      return `
+        <div class="section">
+          <h2>Selected Roof Surface</h2>
+          ${metricRow("Roof ID", roof.roof_id || "-")}
+          ${metricRow("Orientation", orientationKey ? orientationLabel(orientationKey) : "n/a")}
+          ${metricRow("Tilt", `${n(roof.tilt_deg, 1)}°`)}
+          ${metricRow("Area", `${n(roof.area_m2)} m2`)}
+        </div>
+      `;
+    }
+
+    function formatBuildingDetails(buildingName, roof = null) {
       const m = buildingMetrics[buildingName];
       if (!m) {
         return `
@@ -281,10 +297,15 @@
           ${metricRow("Installed power", `${n(m.pv_installed_power_kwp, 3)} kWp`)}
           ${metricRow("Installed PV area", `${n(m.pv_installed_area_m2)} m2`)}
           ${metricRow("Available roof area", `${n(m.available_roof_area_m2)} m2`)}
-          ${metricRow("Dominant roof orientation", dominantOrientationLabel(m.available_by_orientation_m2))}
+          ${metricRow("Detected roof surface area", `${n(m.detected_roof_area_m2)} m2`)}
+          ${formatRoofSurfaceDetails(roof)}
+          <div class="section">
+            <h2>Detected Roof Area by Orientation</h2>
+            <div class="orientationRows">${orientationRowsHtml(m.detected_roof_area_by_orientation_m2 || m.display_available_by_orientation_m2 || m.available_by_orientation_m2, "m2")}</div>
+          </div>
           <div class="section">
             <h2>PV Area by Orientation</h2>
-            <div class="orientationRows">${orientationRowsHtml(m.pv_installed_by_orientation_m2, "m2")}</div>
+            <div class="orientationRows">${orientationRowsHtml(m.display_pv_installed_by_orientation_m2 || m.pv_installed_by_orientation_m2, "m2")}</div>
           </div>
         </div>
       `;
@@ -298,7 +319,8 @@
         if (info.layer.id === "roofs") {
           const buildingName = normaliseBuildingName(info.object.building);
           const bm = metricForBuilding(buildingName) || {};
-          return `Building: ${buildingName || "-"}\nGeneration: ${n(bm.pv_generation_kwh)} kWh/year`;
+          const orientationKey = roofOrientationKey(info.object);
+          return `Building: ${buildingName || "-"}\nRoof: ${info.object.roof_id || "-"}\nOrientation: ${orientationKey ? orientationLabel(orientationKey) : "n/a"}\nTilt: ${n(info.object.tilt_deg, 1)}°\nArea: ${n(info.object.area_m2)} m2\nGeneration: ${n(bm.pv_generation_kwh)} kWh/year`;
         }
         if (info.layer.id === "solar-bars") {
           const bm = buildingMetrics[info.object.building] || {};
@@ -313,7 +335,7 @@
         if (info.layer.id === "roofs") {
           const buildingName = info.object.building || "-";
           setSelectedBuilding(buildingName);
-          details.innerHTML = formatBuildingDetails(buildingName);
+          details.innerHTML = formatBuildingDetails(buildingName, info.object);
           return;
         } else if (info.layer.id === "solar-bars") {
           setSelectedBuilding(info.object.building);
